@@ -10,22 +10,34 @@ void sniffer_callback(void* buff, wifi_promiscuous_pkt_type_t type){
 
   uint8_t *mac_data = pkt->payload; //formatamos um payload original, pegamos um ponteiro de 8 bits e copiamos o payload do pkt para dentro do mac_data
 
+  char len = pkt->rx_ctrl.sig_len;
+  char rssi = pkt->rx_ctrl.rssi;
+  
   //protecao contra pacotes falhos
-  if(pkt->rx_ctrl.sig_len < 22)return;
+  if(len < 22)return;
 
   uint8_t frame_control = mac_data[0];
 
   uint8_t *mac_origem = &mac_data[10];
 
+  char ssid[33] = {0};
+
+  if(frame_control == 0x80 || frame_control == 0x40){
+    uint8_t ssid_len = mac_data[37];
+    if(ssid_len > 0 && ssid_len < 32 && (38 + ssid_len) < len){
+      memcpy(ssid, &mac_data[38], ssid_len);
+    }
+  } else strcpy(ssid, "<OCULTO/BROADCAST>");
+
   switch (frame_control)
   {
   case 0x80: //beacon
-    Serial.printf("[BEACON] ROTEADOR DETECTADO: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n", mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], pkt->rx_ctrl.rssi);
+    Serial.printf("[BEACON] SSID: %-20s | ROTEADOR DETECTADO: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n", ssid, mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], rssi);
 
     break;
   
   case 0x40: // probe request
-    Serial.printf("[PROBE] CELULAR PROCURANDO REDE: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n", mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], pkt->rx_ctrl.rssi);
+    Serial.printf("[PROBE] SSID: %-15s | CELULAR PROCURANDO REDE: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n", ssid, mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], rssi);
     
     break;
 
