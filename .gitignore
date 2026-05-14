@@ -1,0 +1,12 @@
+.pio
+.vscode/
+
+.platformio/
+build/
+dist/
+
+test/
+lib/
+include/
+
+
