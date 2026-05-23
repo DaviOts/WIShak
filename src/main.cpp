@@ -1,6 +1,39 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include "esp_wifi.h"
+#include <map>
+#include <string>
+
+//mapeia o ultimo tempo que cada mac foi armazenado
+std::map<std::string, unsigned long> lastReportTime;
+const unsigned long TIMEOUT_MS = 5000;
+
+//converte mac em string
+std::string macToString(uint8_t* mac) {
+  char buffer[18];
+  sprintf(buffer, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return std::string(buffer);
+}
+
+//verificação para reportar o mac
+bool reportMac(uint8_t* mac) {
+  std::string macStr = macToString(mac);
+  unsigned long now = millis();
+  
+  //caso nunca foi visto, reporta
+  if (lastReportTime.find(macStr) == lastReportTime.end()) {
+    lastReportTime[macStr] = now;
+    return true;
+  }
+  
+  //se passou o timeout, dale report
+  if (now - lastReportTime[macStr] >= TIMEOUT_MS) {
+    lastReportTime[macStr] = now;
+    return true;
+  }
+  
+  return false;
+}
 
 void sniffer_callback(void* buff, wifi_promiscuous_pkt_type_t type){
   //preciso que o type seja management
@@ -11,7 +44,7 @@ void sniffer_callback(void* buff, wifi_promiscuous_pkt_type_t type){
   uint8_t *mac_data = pkt->payload; //formatamos um payload original, pegamos um ponteiro de 8 bits e copiamos o payload do pkt para dentro do mac_data
 
   char len = pkt->rx_ctrl.sig_len;
-  char rssi = pkt->rx_ctrl.rssi;
+  int8_t rssi = pkt->rx_ctrl.rssi;
   
   //protecao contra pacotes falhos
   if(len < 22)return;
@@ -32,19 +65,22 @@ void sniffer_callback(void* buff, wifi_promiscuous_pkt_type_t type){
   switch (frame_control)
   {
   case 0x80: //beacon
-    Serial.printf("[BEACON] SSID: %-20s | ROTEADOR DETECTADO: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n", ssid, mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], rssi);
-
+    if (reportMac(mac_origem)) {
+      Serial.printf("[BEACON] SSID: %-20s | ROTEADOR DETECTADO: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n", ssid, mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], rssi);
+    }
     break;
   
   case 0x40: // probe request
-    Serial.printf("[PROBE] SSID: %-15s | CELULAR PROCURANDO REDE: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n", ssid, mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], rssi);
-    
+    if (reportMac(mac_origem)) {
+      Serial.printf("[PROBE] SSID: %-15s | CELULAR PROCURANDO REDE: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n", ssid, mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], rssi);
+    }
     break;
 
   case 0xC0: // desautenticacao
   case 0xA0: // disassociacao
-    Serial.printf("[ALERTA DEAUTH] ATAQUE/DESCONEXÃO: %02X:%02X:%02X:%02X:%02X:%02X\n", mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5]);
-
+    if (reportMac(mac_origem)) {
+      Serial.printf("[ALERTA DEAUTH] ATAQUE/DESCONEXÃO: %02X:%02X:%02X:%02X:%02X:%02X\n", mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5]);
+    }
     break;
   }
   // //verifica se o payload tem tamanho mínimo antes de acessar
