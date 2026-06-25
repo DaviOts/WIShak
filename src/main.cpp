@@ -1,118 +1,93 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include "esp_wifi.h"
-#include <map>
-#include <string>
 
-//mapeia o ultimo tempo que cada mac foi armazenado
-std::map<std::string, unsigned long> lastReportTime;
-const unsigned long TIMEOUT_MS = 5000;
-
-//converte mac em string
-std::string macToString(uint8_t* mac) {
-  char buffer[18];
-  sprintf(buffer, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return std::string(buffer);
-}
-
-//verificação para reportar o mac
-bool reportMac(uint8_t* mac) {
-  std::string macStr = macToString(mac);
-  unsigned long now = millis();
-  
-  //caso nunca foi visto, reporta
-  if (lastReportTime.find(macStr) == lastReportTime.end()) {
-    lastReportTime[macStr] = now;
-    return true;
-  }
-  
-  //se passou o timeout, dale report
-  if (now - lastReportTime[macStr] >= TIMEOUT_MS) {
-    lastReportTime[macStr] = now;
-    return true;
-  }
-  
-  return false;
-}
-
+/**
+ * Função de Callback para o Modo Promíscuo (Sniffer)
+ * É disparada pelo hardware do ESP32 toda vez que um pacote Wi-Fi é capturado no ar
+ * * @param buff Ponteiro para os dados brutos do pacote capturado
+ * @param type Tipo do pacote capturado (Dados, Gerenciamento, Controle, etc)
+ */
 void sniffer_callback(void* buff, wifi_promiscuous_pkt_type_t type){
-  //preciso que o type seja management
-  if(type != WIFI_PKT_MGMT)return;
+  //aplica um filtro de interesse apenas nos quadros de Gerenciamento (Management Frames)
+  if(type != WIFI_PKT_MGMT) return;
 
-  wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buff; //aponta para a minha struct copia o buff dela todo e joga para um outro ponteiro "*pkt"
+  //realiza o cast do buffer para a estrutura padrão de pacotes promíscuos do ESP32
+  wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buff;
+  //mac_data aponta para o início do cabeçalho MAC do frame 802.11 (Payload do pacote capturado)
+  uint8_t *mac_data = pkt->payload;
 
-  uint8_t *mac_data = pkt->payload; //formatamos um payload original, pegamos um ponteiro de 8 bits e copiamos o payload do pkt para dentro do mac_data
+  //extrai metadados de rádio calculados pelo hardware do chip
+  char len = pkt->rx_ctrl.sig_len; //comprimento total do sinal do pacote em bytes
+  int8_t rssi = pkt->rx_ctrl.rssi; //intensidade do sinal recebido (dBm)
 
-  char len = pkt->rx_ctrl.sig_len;
-  int8_t rssi = pkt->rx_ctrl.rssi;
-  
-  //protecao contra pacotes falhos
-  if(len < 22)return;
+  //validaçao para quadros de gerenciamento que possuem 22 bytes de cabeçalho(minimo)
+  if(len < 22) return;
 
+  //o primeiro byte do cabeçalho 802.11 contém o Frame Control
   uint8_t frame_control = mac_data[0];
-
+  //no padrao IEEE 802.11, o endereço MAC de Origem inicia no offset de memória 10
   uint8_t *mac_origem = &mac_data[10];
 
+  //buffer para armazenar o nome da rede (SSID), limitado ao padrão de 32 caracteres + caractere nulo
   char ssid[33] = {0};
 
+  //extrai o SSID se for Beacon ou Probe
   if(frame_control == 0x80 || frame_control == 0x40){
+    //no cabeçalho offset 37 indica o comprimento do campo SSID
     uint8_t ssid_len = mac_data[37];
+    //validaçao de integridade para evitar um overflow no buffer
     if(ssid_len > 0 && ssid_len < 32 && (38 + ssid_len) < len){
+      //o SSID começa no offset 38
       memcpy(ssid, &mac_data[38], ssid_len);
     }
-  } else strcpy(ssid, "<OCULTO/BROADCAST>");
+  }
 
+  //imprime o JSON puro diretamente no serial port
   switch (frame_control)
   {
-  case 0x80: //beacon
-    if (reportMac(mac_origem)) {
-      Serial.printf("[BEACON] SSID: %-20s | ROTEADOR DETECTADO: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n", ssid, mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], rssi);
-    }
+  case 0x80: // BEACON(quadros de anuncio emitidos por pontos de acesso que sao roteadores)
+    Serial.printf("{\"type\":\"BEACON\", \"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\", \"ssid\":\"%s\", \"rssi\":%d}\n", 
+                  mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], ssid, rssi);
     break;
   
-  case 0x40: // probe request
-    if (reportMac(mac_origem)) {
-      Serial.printf("[PROBE] SSID: %-15s | CELULAR PROCURANDO REDE: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n", ssid, mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], rssi);
-    }
+  case 0x40: // PROBE(dispositivos que buscam redes)
+    Serial.printf("{\"type\":\"PROBE\", \"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\", \"ssid\":\"%s\", \"rssi\":%d}\n", 
+                  mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], ssid, rssi);
     break;
 
-  case 0xC0: // desautenticacao
-  case 0xA0: // disassociacao
-    if (reportMac(mac_origem)) {
-      Serial.printf("[ALERTA DEAUTH] ATAQUE/DESCONEXÃO: %02X:%02X:%02X:%02X:%02X:%02X\n", mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5]);
-    }
+  case 0xC0: // DEAUTH(um comando de desconexao, atques DoS de rede)
+  case 0xA0: // DISASSOCIATION(comando de encerramento de associação)
+    Serial.printf("{\"type\":\"DEAUTH\", \"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\", \"ssid\":\"%s\", \"rssi\":%d}\n", 
+                  mac_origem[0], mac_origem[1], mac_origem[2], mac_origem[3], mac_origem[4], mac_origem[5], ssid, rssi);
     break;
   }
-  // //verifica se o payload tem tamanho mínimo antes de acessar
-  // if (pkt->rx_ctrl.sig_len >= 16) {
-  //   Serial.printf("PACOTE CAPTURADO. RSSI: %d | MAC ORIGEM: %02X:%02X:%02X:%02X:%02X:%02X\n", pkt->rx_ctrl.rssi, mac_data[10], mac_data[11], mac_data[12], mac_data[13], mac_data[14], mac_data[15]);
-  // }
 }
 
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  Serial.println("INICIANDO WIShak - MODO PROMISCUO(Sniffer)");
 
+  //configura a interface wifi para o modo cliente e desconecta de qualquer rede ativa
+  //isso libera o hardware de rádio para o modo promíscuo
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
 
+  //configuração dos filtros de hardware do SDK nativo da Espressif (esp_wifi)
   wifi_promiscuous_filter_t filter;
-  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
-  esp_wifi_set_promiscuous_filter(&filter);
+  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT; // Filtra estritamente a camada de Gerenciamento
 
-  esp_wifi_set_promiscuous_rx_cb(&sniffer_callback);
-
-  esp_wifi_set_promiscuous(true);
-
-  // esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous_filter(&filter); //aplica o filtro estruturado
+  esp_wifi_set_promiscuous_rx_cb(&sniffer_callback); //define a funçao de callback para o tratamento dos dados
+  esp_wifi_set_promiscuous(true); //habilita o modo promíscuo de rádio
 }
 
-void loop() {
+//salto de canais para varredura
+void loop()
+{
   static uint8_t ch = 1;
   esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
   ch = (ch % 13) + 1;
   delay(200);
 }
-
